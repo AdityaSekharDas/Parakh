@@ -1,0 +1,224 @@
+@import url('https://fonts.googleapis.com/css2?family=Archivo+Narrow:wght@500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&display=swap');
+
+@import 'tailwindcss';
+
+/* Class-based dark mode: html.dark keys the dark: variant */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Ink & Vermilion — near-black ink printed on warm stock */
+  --color-paper: #f2eee5;
+  --color-paper-2: #eae5d9;
+  --color-card: #f8f6f0;
+  --color-ink: #16130f;
+  --color-ink-2: #3d382f;
+  --color-ink-3: #6f685b;
+  --color-ink-4: #a39a89;
+  --color-rule: #16130f26;
+  --color-rule-hard: #16130f;
+
+  /* Single accent — reserved for critical evidence */
+  --color-vermilion: #d02a0d;
+  --color-vermilion-2: #f0d5cd;
+
+  /* Risk tiers (pitch §5.3): GREEN < 40 · YELLOW 40–70 · RED > 70 */
+  --color-tier-green: #2c6248;
+  --color-tier-yellow: #b8860a;
+  --color-tier-red: #d02a0d;
+
+  /* Review status */
+  --color-status-pending: #a39a89;
+  --color-status-assigned: #16130f;
+  --color-status-reviewing: #b8860a;
+  --color-status-fraud: #d02a0d;
+  --color-status-legit: #2c6248;
+
+  --font-display: 'Archivo Narrow', ui-sans-serif, system-ui, sans-serif;
+  --font-sans: 'Public Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'DM Mono', ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    /* Newsprint tooth: a faint halftone grain over the whole sheet */
+    background-image: radial-gradient(
+      circle at center,
+      #16130f0f 0.5px,
+      transparent 0.6px
+    );
+    background-size: 4px 4px;
+  }
+
+  ::selection {
+    background: var(--color-vermilion);
+    color: var(--color-paper);
+  }
+
+  /* Scrollbars appear only while scrolling */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+  *:hover,
+  *:focus-within {
+    scrollbar-color: var(--color-ink-4) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 0;
+  }
+  *:hover::-webkit-scrollbar-thumb {
+    background: var(--color-ink-4);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-vermilion);
+    outline-offset: 2px;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Dark mode — espresso-brown stock. Same token names re-tinted, so   */
+/* every utility, chart, pill, and inline var() flips as one.         */
+/* ------------------------------------------------------------------ */
+
+html.dark {
+  color-scheme: dark;
+
+  /* Stock: roasted-brown paper; ink: warm cream */
+  --color-paper: #241c15;
+  --color-paper-2: #2c231a;
+  --color-card: #2a211a;
+  --color-ink: #efe3cc;
+  --color-ink-2: #cdc0a7;
+  --color-ink-3: #a2947c;
+  --color-ink-4: #7c705b;
+  --color-rule: #efe3cc2e;
+  --color-rule-hard: #efe3cc;
+
+  /* Accent lifted for dark-room legibility */
+  --color-vermilion: #e24a2e;
+  --color-vermilion-2: #52281f;
+
+  /* Risk tiers — same hue language, brighter on brown */
+  --color-tier-green: #7caf8f;
+  --color-tier-yellow: #cfaa3e;
+  --color-tier-red: #e24a2e;
+
+  --color-status-pending: #a2947c;
+  --color-status-assigned: #efe3cc;
+  --color-status-reviewing: #cfaa3e;
+  --color-status-fraud: #e24a2e;
+  --color-status-legit: #7caf8f;
+
+  body {
+    /* Halftone grain in cream instead of ink */
+    background-image: radial-gradient(
+      circle at center,
+      #efe3cc10 0.5px,
+      transparent 0.6px
+    );
+    background-size: 4px 4px;
+  }
+
+  ::selection {
+    color: var(--color-paper);
+  }
+}
+
+@layer utilities {
+  /* All numerals align in columns — this is an instrument, not prose */
+  .nums {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  .label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-ink-3);
+  }
+
+  /* Halftone fills — density encodes severity, the way print encodes tone */
+  .halftone {
+    background-image: radial-gradient(
+      circle at center,
+      currentColor var(--dot, 1px),
+      transparent calc(var(--dot, 1px) + 0.35px)
+    );
+    background-size: var(--cell, 4px) var(--cell, 4px);
+  }
+
+  .rule-t {
+    border-top: 1px solid var(--color-rule);
+  }
+  .rule-b {
+    border-bottom: 1px solid var(--color-rule);
+  }
+
+  .ticker-track {
+    animation: ticker 48s linear infinite;
+  }
+
+  @keyframes ticker {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-50%);
+    }
+  }
+
+  .alert-enter {
+    animation: alert-enter 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+
+  @keyframes alert-enter {
+    from {
+      opacity: 0;
+      transform: translateY(-6px);
+      background: var(--color-vermilion-2);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .pulse-dot {
+    animation: pulse-dot 1.8s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.25;
+    }
+  }
+
+  @media print {
+    .no-print {
+      display: none !important;
+    }
+  }
+}
