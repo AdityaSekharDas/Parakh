@@ -1,11 +1,28 @@
-# Parakh - Backend
+# PARAKH Backend
 
-Backend for Parakh. The API layer is not implemented yet and will be built here.
+Deterministic FastAPI + SQLite demo API for the PARAKH UPI fraud-risk engine.
+It mirrors the frontend mock contract: evidence-rich alerts, a consented-call
+verdict, citizen confirmation, analyst resolution, and a replayable ticker.
 
-Planned responsibilities:
+## Run
 
-- REST API consumed by the front-end (`front-end/`)
-- Data models for citizens, operators, service requests, alerts and payments
-- Operator review and analytics endpoints
+```powershell
+cd back-end
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --reload
+```
 
-Stack and structure will be decided and documented here once development begins.
+Open `http://127.0.0.1:8000/docs` for the interactive routes. The API creates
+`parakh.db` and loads its deterministic data on its first start. During that
+seed step, `app/forest.py` trains a fixed-seed Isolation Forest once and saves
+the resulting scores in SQLite; requests only read those cached scores.
+
+```powershell
+python -m pytest
+python scripts/stream.py --no-sleep
+```
+
+`PARAKH_DB` can point at a different SQLite file for tests. Set
+`PARAKH_ENGINE=stub` to serve the authored seed alerts as the demo fallback;
+the default `live` mode reads the seeded SQLite data. The replay assets live in
+`seed/display.json` and `seed/transactions.json`.

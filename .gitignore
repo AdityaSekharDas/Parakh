@@ -26,3 +26,15 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
+
+# PARAKH backend runtime and agent notes
+back-end/parakh.db
+back-end/__pycache__/
+back-end/app/__pycache__/
+back-end/scripts/__pycache__/
+back-end/.venv/
+back-end/models/
+back-end/Goals/*
+
+back-end/.pytest_temp/
+back-end/.pytest_cache/

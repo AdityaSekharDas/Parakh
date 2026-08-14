@@ -1,0 +1,237 @@
+"""FastAPI routes for PARAKH's deterministic fraud-review demonstration."""
+
+from __future__ import annotations
+
+import os
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from . import callanalyzer, db, engine, seed
+from .schemas import AnalyzeRequest, AssignRequest, IngestRequest, LoginRequest, ResolveRequest, tier_of
+
+
+ENGINE_MODE = os.environ.get("PARAKH_ENGINE", "live").lower()
+OPEN_STATUSES = {"pending", "assigned", "reviewing"}
+_STUB_ALERTS: list[dict] | None = None
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Initialise the demo database before the first request."""
+    db.init_db()
+    db.seed_if_empty()
+    yield
+
+
+app = FastAPI(title="PARAKH API", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _alerts(status: str | None = None, tier: str | None = None) -> list[dict]:
+    """Return filtered alerts while preserving the authored queue ordering."""
+    global _STUB_ALERTS
+    if ENGINE_MODE == "stub":
+        if _STUB_ALERTS is None:
+            _STUB_ALERTS = seed.build_alerts()
+        alerts = _STUB_ALERTS
+    else:
+        alerts = db.list_alerts()
+    if status:
+        statuses = OPEN_STATUSES if status == "open" else {status}
+        alerts = [alert for alert in alerts if alert["status"] in statuses]
+    if tier:
+        alerts = [alert for alert in alerts if alert["tier"] == tier]
+    return alerts
+
+
+def _analytics() -> dict:
+    """Return the seed analytics plus deterministic drift from human decisions."""
+    analytics = dict(seed.ANALYTICS)
+    resolutions = db.list_resolutions()
+    actions = [resolution["action"] for resolution in resolutions]
+    frauds = sum(action in {"freeze", "block", "stop"} for action in actions)
+    clears = actions.count("clear")
+    continues = actions.count("continue")
+    analytics.update({
+        "confirmed": 14 + frauds,
+        "falsePositives": 5 + clears,
+        "actioned": 12 + len(actions),
+        "actionedOf": 15 + len(actions),
+        "precision": min(100, max(0, 84 + frauds - clears)),
+        "recall": min(100, max(0, 76 + frauds - continues)),
+    })
+    return analytics
+
+
+def _engine_block(alert: dict) -> dict:
+    """Expose authored scoring components as inspectable judge evidence."""
+    rule_points = sum(item["points"] for item in alert["reasons"])
+    cached = db.get_engine_scores(alert["id"])
+    return cached or {"rulePoints": rule_points, "forestScore": None, "fusedScore": alert["score"]}
+
+
+def _verdict_card(tier: str) -> dict | None:
+    """Build the human-choice card only for payments held for review."""
+    if tier == "green":
+        return None
+    if tier == "yellow":
+        return {"title": "Payment held for your confirmation", "choices": ["This is mine — continue", "Not mine — stop it"], "learns": True}
+    return {"title": "Payment held for bank review", "choices": ["Bank analyst review required"], "learns": True}
+
+
+@app.get("/health")
+def health() -> dict:
+    """Confirm that the local demo API is reachable."""
+    return {"ok": True}
+
+
+@app.get("/")
+def root() -> dict:
+    """Point a browser opened at the API root to the useful demo endpoints."""
+    return {"name": "PARAKH API", "docs": "/docs", "health": "/health"}
+
+
+@app.post("/login")
+def login(identity: LoginRequest) -> dict:
+    """Echo a demo identity; real banking credentials are never accepted."""
+    return {"ok": True, "identity": identity.model_dump()}
+
+
+@app.get("/login/meta")
+def login_meta() -> dict:
+    """Provide the fixed operator and citizen pickers for the login screen."""
+    return {"analysts": seed.ANALYSTS, "currentAnalyst": seed.CURRENT_ANALYST, "customers": [{"id": customer["id"], "name": customer["name"]} for customer in seed.CUSTOMERS.values()]}
+
+
+@app.get("/overview")
+def overview() -> dict:
+    """Return the operator dashboard metrics, score distribution, and recent alerts."""
+    cohort = seed.build_cohort()
+    open_alerts = _alerts(status="open")
+    histogram = []
+    for lower in range(0, 100, 10):
+        histogram.append({"bucket": f"{lower}–{lower + 9}", "count": sum(lower <= customer["score"] <= lower + 9 for customer in cohort), "tier": tier_of(lower)})
+    resolutions = db.list_resolutions()
+    actions = [resolution["action"] for resolution in resolutions]
+    frauds = sum(action in {"freeze", "block", "stop"} for action in actions)
+    clears = actions.count("clear")
+    continues = actions.count("continue")
+    return {"kpi": {"customers": len(cohort), "activeAlerts": len(open_alerts), "alertsToday": 3, "avgScore": round(sum(customer["score"] for customer in cohort) / len(cohort)), "interceptedLakh": 11.8, "interceptedPct": 2.4, "precision": min(100, max(0, 82 + frauds - clears)), "recall": min(100, max(0, 74 + frauds - continues))}, "histogram": histogram, "recent": _alerts()[:6], "model": seed.ANALYTICS["model"]}
+
+
+@app.get("/alerts")
+def list_alerts(status: str | None = None, tier: str | None = None) -> list[dict]:
+    """List the review queue, optionally filtered by status and risk tier."""
+    return _alerts(status, tier)
+
+
+@app.get("/alerts/{alert_id}")
+def alert_detail(alert_id: str) -> dict:
+    """Return one alert with its linked call, customer, decisions, and score evidence."""
+    alert = next((item for item in _alerts() if item["id"] == alert_id), None)
+    if not alert:
+        raise HTTPException(status_code=404, detail="alert not found")
+    return {"alert": alert, "call": db.get_call(alert["callId"]) if alert.get("callId") else None, "customer": db.get_user(alert["customerId"]), "resolutions": db.list_resolutions(alert_id), "engine": _engine_block(alert)}
+
+
+@app.post("/alerts/{alert_id}/assign")
+def assign_alert(alert_id: str, request: AssignRequest) -> dict:
+    """Assign an alert and move a pending case into the assigned state."""
+    alert = next((item for item in _alerts() if item["id"] == alert_id), None)
+    if not alert:
+        raise HTTPException(status_code=404, detail="alert not found")
+    alert["assignee"] = request.assignee
+    if alert["status"] == "pending":
+        alert["status"] = "assigned"
+    if ENGINE_MODE != "stub":
+        db.save_alert(alert)
+    return {"ok": True, "alert": alert}
+
+
+@app.post("/alerts/{alert_id}/resolve")
+def resolve_alert(alert_id: str, request: ResolveRequest) -> dict:
+    """Record a citizen or analyst decision while retaining the original evidence."""
+    alert = next((item for item in _alerts() if item["id"] == alert_id), None)
+    if not alert:
+        raise HTTPException(status_code=404, detail="alert not found")
+    fraud = request.action in {"freeze", "block", "stop"}
+    alert["status"] = "fraud" if fraud else "legit"
+    alert["resolution"] = f"Confirmed by {seed.CURRENT_ANALYST}" if fraud else f"Marked legitimate by {request.decidedBy}"
+    if request.decidedBy == "analyst":
+        alert["assignee"] = seed.CURRENT_ANALYST
+    if ENGINE_MODE != "stub":
+        db.save_alert(alert)
+    db.add_resolution(alert_id, request.action, request.decidedBy, request.note)
+    return {"ok": True, "alert": alert}
+
+
+@app.get("/analytics")
+def analytics() -> dict:
+    """Return learning-loop metrics that move after each recorded resolution."""
+    return _analytics()
+
+
+@app.post("/ingest")
+def ingest(transaction: IngestRequest) -> dict:
+    """Score a seeded replay payment or an unknown judge-entered payment."""
+    replay = seed.replay_transaction(transaction.txnId)
+    authored = next((item for item in _alerts() if item["id"] == transaction.txnId), None)
+    if replay and authored:
+        return {"alertId": authored["id"], "txnId": transaction.txnId, "score": authored["score"], "tier": authored["tier"], "reasons": authored["reasons"], "verdictCard": _verdict_card(authored["tier"])}
+    user = db.get_user(transaction.userId)
+    if not user:
+        raise HTTPException(status_code=400, detail="unknown userId; choose a seeded customer")
+    calls = db.list_calls_by_user(transaction.userId)
+    call = next((item for item in calls if item.get("isCoercive")), None)
+    db.insert_transaction(transaction.model_dump())
+    verdict = engine.score_transaction(transaction.model_dump(), user, call, velocity=0, forest=None)
+    if verdict["tier"] == "green":
+        return {"alertId": None, "txnId": transaction.txnId, "score": verdict["score"], "tier": "green", "reasons": [], "verdictCard": None}
+    alert = {"id": transaction.txnId, "customerId": transaction.userId, "customerName": user["name"], "payee": transaction.payee, "payeeName": transaction.payeeName, "amount": transaction.amount, "channel": transaction.channel, "device": transaction.device, "hour": transaction.hour, "score": verdict["score"], "tier": verdict["tier"], "reason": "; ".join(item["label"] for item in verdict["reasons"]), "reasons": verdict["reasons"], "narrative": "Live deterministic score for a judge-entered payment.", "callId": call["id"] if call else None, "status": "pending", "assignee": None, "resolution": None, "ageDays": 0, "generatedAt": "demo-live", "confidence": "Live rule score", "series": [verdict["score"]] * 20, "txnAt": 0, "callAt": 0 if call else None}
+    db.insert_alert(alert)
+    return {"alertId": alert["id"], "txnId": transaction.txnId, "score": alert["score"], "tier": alert["tier"], "reasons": alert["reasons"], "verdictCard": _verdict_card(alert["tier"])}
+
+
+@app.get("/stream")
+def stream(since: int = 0) -> dict:
+    """Return deterministic ticker events after the caller's last index."""
+    safe_since = max(0, since)
+    return {"events": seed.TICKER[safe_since:], "next": len(seed.TICKER)}
+
+
+@app.post("/calls/analyze")
+def analyze_call(request: AnalyzeRequest) -> dict:
+    """Analyze a supplied redacted transcript with the same demo classifier."""
+    return callanalyzer.analyze(request.transcript)
+
+
+@app.get("/citizen/me")
+def citizen_me() -> dict:
+    """Return Sarita's fixed citizen persona and demo balance."""
+    return {"customer": db.get_user(seed.CURRENT_CUSTOMER_ID), "balance": 184320}
+
+
+@app.get("/citizen/alerts")
+def citizen_alerts() -> list[dict]:
+    """Return only the current citizen's alerts in their authored order."""
+    return [alert for alert in _alerts() if alert["customerId"] == seed.CURRENT_CUSTOMER_ID]
+
+
+@app.get("/citizen/transactions")
+def citizen_transactions() -> list[dict]:
+    """Return the eight fixed statement rows for the citizen demonstration."""
+    return seed.CITIZEN_TRANSACTIONS
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=False)
