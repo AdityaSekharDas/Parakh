@@ -2,4 +2,4 @@ fastapi
 uvicorn[standard]
 scikit-learn
 pytest
-httpx
+httpx2

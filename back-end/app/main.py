@@ -81,11 +81,9 @@ def _analytics() -> dict:
 
 def _engine_block(alert: dict) -> dict:
     """Expose authored scoring components as inspectable judge evidence."""
-    if ENGINE_MODE == "stub":
-        rule_points = sum(r.get("points", 0) for r in alert.get("reasons", []))
-        return {"rulePoints": rule_points, "forestScore": None, "fusedScore": alert.get("score")}
+    rule_points = sum(item.get("points", 0) for item in alert.get("reasons", []))
     cached = db.get_engine_scores(alert["id"])
-    return cached or {"rulePoints": sum(item["points"] for item in alert["reasons"]), "forestScore": None, "fusedScore": alert["score"]}
+    return cached or {"rulePoints": rule_points, "forestScore": None, "fusedScore": rule_points}
 
 
 def _verdict_card(tier: str) -> dict | None:
