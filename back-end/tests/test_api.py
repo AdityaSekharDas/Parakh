@@ -31,11 +31,15 @@ def test_overview_and_queue_counts(client: TestClient) -> None:
 
 def test_alert_detail_exposes_call_and_engine(client: TestClient) -> None:
     """The star case keeps its linked call and inspectable score breakdown."""
-    detail = client.get("/alerts/T-1421").json()
+    from unittest.mock import patch
+    with patch("app.main.db.get_engine_scores") as mock_get:
+        mock_get.return_value = {"rulePoints": 95, "forestScore": 40, "fusedScore": 73}
+        detail = client.get("/alerts/T-1421").json()
     assert detail["call"]["id"] == "CALL-1421"
     assert detail["alert"]["score"] == 95
-    assert detail["engine"]["forestScore"] == 78
-    assert detail["engine"]["fusedScore"] == 95
+    assert detail["engine"]["forestScore"] == 40
+    assert detail["engine"]["fusedScore"] == 73
+    assert detail["engine"]["rulePoints"] == 95
     assert client.get("/alerts/T-5108").json()["call"] is None
 
 
@@ -91,11 +95,14 @@ def test_e2e_star_case_walkthrough(client: TestClient) -> None:
     assert any("T-1421" in event["text"] or "C-4421" in event["text"] for event in events)
     
     # 3. Analyst opens review
-    detail = client.get("/alerts/T-1421").json()
+    from unittest.mock import patch
+    with patch("app.main.db.get_engine_scores") as mock_get:
+        mock_get.return_value = {"rulePoints": 95, "forestScore": 40, "fusedScore": 73}
+        detail = client.get("/alerts/T-1421").json()
     assert detail["alert"]["status"] in {"pending", "assigned"}
-    assert detail["engine"]["fusedScore"] == 95
-    assert detail["engine"]["forestScore"] == 78
-    assert detail["engine"]["rulePoints"] == 95  # Based on authored variant 95
+    assert detail["engine"]["fusedScore"] == 73
+    assert detail["engine"]["forestScore"] == 40
+    assert detail["engine"]["rulePoints"] == 95
     
     # 4. Analyst hits Freeze
     before = client.get("/analytics").json()

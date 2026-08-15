@@ -8,13 +8,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import callanalyzer, db, engine, seed
+import json
+from pathlib import Path
+from . import callanalyzer, db, engine
 from .schemas import AnalyzeRequest, AssignRequest, IngestRequest, LoginRequest, ResolveRequest, tier_of
 
 
 ENGINE_MODE = os.environ.get("PARAKH_ENGINE", "live").lower()
 OPEN_STATUSES = {"pending", "assigned", "reviewing"}
 _STUB_ALERTS: list[dict] | None = None
+SEED_DIR = Path(__file__).resolve().parent.parent / "seed"
 
 
 @asynccontextmanager
@@ -40,7 +43,11 @@ def _alerts(status: str | None = None, tier: str | None = None) -> list[dict]:
     global _STUB_ALERTS
     if ENGINE_MODE == "stub":
         if _STUB_ALERTS is None:
-            _STUB_ALERTS = seed.build_alerts()
+            with open(SEED_DIR / "transactions.json", "r", encoding="utf-8") as f:
+                _STUB_ALERTS = json.load(f)
+                for alert in _STUB_ALERTS:
+                    if "txnId" in alert and "id" not in alert:
+                        alert["id"] = alert.pop("txnId")
         alerts = _STUB_ALERTS
     else:
         alerts = db.list_alerts()
@@ -54,7 +61,8 @@ def _alerts(status: str | None = None, tier: str | None = None) -> list[dict]:
 
 def _analytics() -> dict:
     """Return the seed analytics plus deterministic drift from human decisions."""
-    analytics = dict(seed.ANALYTICS)
+    with open(SEED_DIR / "display.json", "r", encoding="utf-8") as f:
+        analytics = dict(json.load(f)["analytics"])
     resolutions = db.list_resolutions()
     actions = [resolution["action"] for resolution in resolutions]
     frauds = sum(action in {"freeze", "block", "stop"} for action in actions)
@@ -73,9 +81,11 @@ def _analytics() -> dict:
 
 def _engine_block(alert: dict) -> dict:
     """Expose authored scoring components as inspectable judge evidence."""
-    rule_points = sum(item["points"] for item in alert["reasons"])
+    if ENGINE_MODE == "stub":
+        rule_points = sum(r.get("points", 0) for r in alert.get("reasons", []))
+        return {"rulePoints": rule_points, "forestScore": None, "fusedScore": alert.get("score")}
     cached = db.get_engine_scores(alert["id"])
-    return cached or {"rulePoints": rule_points, "forestScore": None, "fusedScore": alert["score"]}
+    return cached or {"rulePoints": sum(item["points"] for item in alert["reasons"]), "forestScore": None, "fusedScore": alert["score"]}
 
 
 def _verdict_card(tier: str) -> dict | None:
@@ -108,13 +118,18 @@ def login(identity: LoginRequest) -> dict:
 @app.get("/login/meta")
 def login_meta() -> dict:
     """Provide the fixed operator and citizen pickers for the login screen."""
-    return {"analysts": seed.ANALYSTS, "currentAnalyst": seed.CURRENT_ANALYST, "customers": [{"id": customer["id"], "name": customer["name"]} for customer in seed.CUSTOMERS.values()]}
+    with open(SEED_DIR / "display.json", "r", encoding="utf-8") as f:
+        display = json.load(f)
+    with open(SEED_DIR / "users.json", "r", encoding="utf-8") as f:
+        users = json.load(f)
+    return {"analysts": display["analysts"], "currentAnalyst": display["currentAnalyst"], "customers": [{"id": customer["id"], "name": customer["name"]} for customer in users]}
 
 
 @app.get("/overview")
 def overview() -> dict:
     """Return the operator dashboard metrics, score distribution, and recent alerts."""
-    cohort = seed.build_cohort()
+    with open(SEED_DIR / "cohort.json", "r", encoding="utf-8") as f:
+        cohort = json.load(f)
     open_alerts = _alerts(status="open")
     histogram = []
     for lower in range(0, 100, 10):
@@ -124,7 +139,9 @@ def overview() -> dict:
     frauds = sum(action in {"freeze", "block", "stop"} for action in actions)
     clears = actions.count("clear")
     continues = actions.count("continue")
-    return {"kpi": {"customers": len(cohort), "activeAlerts": len(open_alerts), "alertsToday": 3, "avgScore": round(sum(customer["score"] for customer in cohort) / len(cohort)), "interceptedLakh": 11.8, "interceptedPct": 2.4, "precision": min(100, max(0, 82 + frauds - clears)), "recall": min(100, max(0, 74 + frauds - continues))}, "histogram": histogram, "recent": _alerts()[:6], "model": seed.ANALYTICS["model"]}
+    with open(SEED_DIR / "display.json", "r", encoding="utf-8") as f:
+        display = json.load(f)
+    return {"kpi": {"customers": len(cohort), "activeAlerts": len(open_alerts), "alertsToday": 3, "avgScore": round(sum(customer["score"] for customer in cohort) / len(cohort)), "interceptedLakh": 11.8, "interceptedPct": 2.4, "precision": min(100, max(0, 82 + frauds - clears)), "recall": min(100, max(0, 74 + frauds - continues))}, "histogram": histogram, "recent": _alerts()[:6], "model": display["analytics"]["model"]}
 
 
 @app.get("/alerts")
@@ -163,10 +180,12 @@ def resolve_alert(alert_id: str, request: ResolveRequest) -> dict:
     if not alert:
         raise HTTPException(status_code=404, detail="alert not found")
     fraud = request.action in {"freeze", "block", "stop"}
+    with open(SEED_DIR / "display.json", "r", encoding="utf-8") as f:
+        current_analyst = json.load(f)["currentAnalyst"]
     alert["status"] = "fraud" if fraud else "legit"
-    alert["resolution"] = f"Confirmed by {seed.CURRENT_ANALYST}" if fraud else f"Marked legitimate by {request.decidedBy}"
+    alert["resolution"] = f"Confirmed by {current_analyst}" if fraud else f"Marked legitimate by {request.decidedBy}"
     if request.decidedBy == "analyst":
-        alert["assignee"] = seed.CURRENT_ANALYST
+        alert["assignee"] = current_analyst
     if ENGINE_MODE != "stub":
         db.save_alert(alert)
     db.add_resolution(alert_id, request.action, request.decidedBy, request.note)
@@ -182,7 +201,9 @@ def analytics() -> dict:
 @app.post("/ingest")
 def ingest(transaction: IngestRequest) -> dict:
     """Score a seeded replay payment or an unknown judge-entered payment."""
-    replay = seed.replay_transaction(transaction.txnId)
+    with open(SEED_DIR / "citizen.json", "r", encoding="utf-8") as f:
+        citizen_txns = json.load(f)["transactions"]
+    replay = next((item for item in citizen_txns if item["id"] == transaction.txnId), None)
     authored = next((item for item in _alerts() if item["id"] == transaction.txnId), None)
     if replay and authored:
         return {"alertId": authored["id"], "txnId": transaction.txnId, "score": authored["score"], "tier": authored["tier"], "reasons": authored["reasons"], "verdictCard": _verdict_card(authored["tier"])}
@@ -204,7 +225,9 @@ def ingest(transaction: IngestRequest) -> dict:
 def stream(since: int = 0) -> dict:
     """Return deterministic ticker events after the caller's last index."""
     safe_since = max(0, since)
-    return {"events": seed.TICKER[safe_since:], "next": len(seed.TICKER)}
+    with open(SEED_DIR / "display.json", "r", encoding="utf-8") as f:
+        ticker = json.load(f)["ticker"]
+    return {"events": ticker[safe_since:], "next": len(ticker)}
 
 
 @app.post("/calls/analyze")
@@ -216,19 +239,24 @@ def analyze_call(request: AnalyzeRequest) -> dict:
 @app.get("/citizen/me")
 def citizen_me() -> dict:
     """Return Sarita's fixed citizen persona and demo balance."""
-    return {"customer": db.get_user(seed.CURRENT_CUSTOMER_ID), "balance": 184320}
+    with open(SEED_DIR / "citizen.json", "r", encoding="utf-8") as f:
+        citizen = json.load(f)
+    return {"customer": db.get_user(citizen["customer"]["id"]), "balance": citizen["balance"]}
 
 
 @app.get("/citizen/alerts")
 def citizen_alerts() -> list[dict]:
     """Return only the current citizen's alerts in their authored order."""
-    return [alert for alert in _alerts() if alert["customerId"] == seed.CURRENT_CUSTOMER_ID]
+    with open(SEED_DIR / "citizen.json", "r", encoding="utf-8") as f:
+        customer_id = json.load(f)["customer"]["id"]
+    return [alert for alert in _alerts() if alert["customerId"] == customer_id]
 
 
 @app.get("/citizen/transactions")
 def citizen_transactions() -> list[dict]:
     """Return the eight fixed statement rows for the citizen demonstration."""
-    return seed.CITIZEN_TRANSACTIONS
+    with open(SEED_DIR / "citizen.json", "r", encoding="utf-8") as f:
+        return json.load(f)["transactions"]
 
 
 if __name__ == "__main__":
